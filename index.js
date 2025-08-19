@@ -423,7 +423,6 @@ function setupTrigger() {
 }
 
 
-
 // IMPORTANT: Delete this entire block after configuring token for security
 // function setSparkPostToken() {
 //     const token = 'PASTE_REAL_TOKEN_HERE_THEN_RUN_ONCE_AND_DELETE';

@@ -82,5 +82,5 @@ const TEST_EMAIL = "test-email@company.com"; // an email for tests
 
 #### Deployment Mode:
 ```javascript
-const TESTING_MODE = false; // Set to false for final deployment
+const TESTING_MODE = false;
 ```
