@@ -10,8 +10,8 @@ const SPARKPOST_URL = 'https://api.sparkpost.com/api/v1/transmissions';
 
 const WORKSHEETS = [
     'Offline Orders',
-    'ebay, Amazon & Walmart',
-    'NNC NES & non-wire'
+    'eBay, Amazon & Walmart',
+    'NNC NES & Non-Wire'
 ];
 
 function onEdit(e) {
@@ -116,6 +116,68 @@ function getRowData(sheet, row) {
         data[key] = values[index];
     });
 
+    // Check if status column is merged and collect all products from merged rows
+    const statusColumnIndex = findColumnIndex(headers, ['status']);
+    const productColumnIndex = findColumnIndex(headers, ['product']);
+    const qtyColumnIndex = findColumnIndex(headers, ['qty']);
+    const poColumnIndex = findColumnIndex(headers, ['po']);
+    const trackingColumnIndex = findColumnIndex(headers, ['tracing number', 'tracking number']);
+    
+    if (statusColumnIndex > 0) {
+        const statusRange = sheet.getRange(row, statusColumnIndex);
+        const mergedRanges = statusRange.getMergedRanges();
+        
+        if (mergedRanges.length > 0) {
+            const mergedRange = mergedRanges[0];
+            const startRow = mergedRange.getRow();
+            const numRows = mergedRange.getNumRows();
+            
+            let allProducts = [];
+            let allQtys = [];
+            let allPOs = [];
+            let allTracking = [];
+            
+            for (let i = 0; i < numRows; i++) {
+                const currentRow = startRow + i;
+                const rowValues = sheet.getRange(currentRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+                
+                if (productColumnIndex > 0 && rowValues[productColumnIndex - 1]) {
+                    const product = rowValues[productColumnIndex - 1].toString().trim();
+                    if (product && product !== '') allProducts.push(product);
+                }
+                
+                if (qtyColumnIndex > 0 && rowValues[qtyColumnIndex - 1]) {
+                    const qty = rowValues[qtyColumnIndex - 1].toString().trim();
+                    if (qty && qty !== '') allQtys.push(qty);
+                }
+                
+                if (poColumnIndex > 0 && rowValues[poColumnIndex - 1]) {
+                    const po = rowValues[poColumnIndex - 1].toString().trim();
+                    if (po && po !== '') allPOs.push(po);
+                }
+                
+                if (trackingColumnIndex > 0 && rowValues[trackingColumnIndex - 1]) {
+                    const tracking = rowValues[trackingColumnIndex - 1].toString().trim();
+                    if (tracking && tracking !== '') allTracking.push(tracking);
+                }
+            }
+            
+            if (allProducts.length > 0) {
+                data['product'] = allProducts.join('\n');
+            }
+            if (allQtys.length > 0) {
+                data['qty'] = allQtys.join('\n');
+            }
+            if (allPOs.length > 0) {
+                data['po'] = allPOs.join(',');
+            }
+            if (allTracking.length > 0) {
+                data['tracing number'] = allTracking.join('\n');
+                data['tracking number'] = allTracking.join('\n');
+            }
+        }
+    }
+
     // En case there are multiple emails
     let emailField = data['email'] || '';
     let primaryEmail = '';
@@ -170,24 +232,8 @@ function getUnsentDeliveredOrdersForCustomer(sheet, customerEmail) {
     const customerOrders = [];
 
     allData.forEach((row, index) => {
-        const data = {};
-        headers.forEach((header, colIndex) => {
-            const key = header.toString().toLowerCase().trim();
-            data[key] = row[colIndex];
-        });
-
-        const orderData = {
-            po: data['po'] || '',
-            date: data['date'] || '',
-            type: data['type'] || '',
-            customerName: data['contact'] || '',
-            qty: data['qty'] || '',
-            products: data['product'] || '',
-            status: data['status'] || '',
-            trackingNumber: data['tracing number'] || data['tracking number'] || '',
-            email: data['email'] || '',
-            row: index + 3
-        };
+        const rowNumber = index + 3;
+        const orderData = getRowData(sheet, rowNumber);
 
         if (orderData.email === customerEmail &&
             orderData.status.toString().toLowerCase() === 'delivered' &&
@@ -211,16 +257,26 @@ function sendDeliveryEmail(originalEmail, orders) {
         const customerName = orders[0].customerName || 'Valued Customer';
         const orderNumbers = orders.map(order => order.po).filter(po => po).join('\n');
         const productList = orders.map(order => {
-            const qty = order.qty || '';
-            const product = order.products || '';
-            return qty && product ? `-${product} (${qty})` : `-${product}`;
-        }).filter(p => p !== '-').join('\n');
+            const products = (order.products || '').split('\n').filter(p => p.trim());
+            const qtys = (order.qty || '').toString().split('\n').filter(q => q.trim());
+            
+            if (products.length > 1) {
+                return products.map((product, index) => {
+                    const qty = qtys[index] || '';
+                    return qty ? `${product} (${qty})` : product;
+                }).join('\n');
+            } else {
+                const qty = order.qty || '';
+                const product = order.products || '';
+                return qty && product ? `${product} (${qty})` : product;
+            }
+        }).filter(p => p.trim()).join('\n');
         const trackingNumbers = orders.map(order => order.trackingNumber).filter(t => t).join('\n-');
         const formattedTracking = trackingNumbers ? `-${trackingNumbers}` : 'No tracking numbers available';
 
         const destinationEmail = TESTING_MODE ? TEST_EMAIL : originalEmail;
         const subjectPrefix = TESTING_MODE ? "[TESTING] " : "";
-        const fromEmail = originalEmail.split('@')[0] + '@nnc.NNCNationalCable.com';
+        const fromEmail = 'noreply@nnc.nncnationalcable.com';
 
         const emailContent = {
             "use_sandbox": false,
@@ -236,7 +292,7 @@ function sendDeliveryEmail(originalEmail, orders) {
                     "name": "NNC Orders"
                 },
                 "subject": subjectPrefix + "Your order has been delivered",
-                "html": generateEmailHTML(customerName, orderNumbers, productList, formattedTracking, originalEmail),
+                "html": generateEmailHTML(customerName, orderNumbers, productList, formattedTracking, originalEmail, orders),
                 "text": generateEmailText(customerName, orderNumbers, productList, formattedTracking, originalEmail)
             }
         };
@@ -295,7 +351,7 @@ function sendDeliveryEmail(originalEmail, orders) {
     }
 }
 
-function generateEmailHTML(customerName, orderNumbers, productList, trackingNumbers, originalEmail = '') {
+function generateEmailHTML(customerName, orderNumbers, productList, trackingNumbers, originalEmail = '', orders = []) {
     const testingBanner = TESTING_MODE ? `
     <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; margin-bottom: 20px; border-radius: 5px;">
       <h3 style="color: #856404; margin: 0;"> TESTING MODE</h3>
@@ -307,39 +363,119 @@ function generateEmailHTML(customerName, orderNumbers, productList, trackingNumb
     </div>
   ` : '';
 
-    return `
-    <html>
-    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-      <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-        ${testingBanner}
-        
-        <h2 style="color: #2c3e50;">Hi ${customerName},</h2>
-        
-        <p>Your order has been delivered, and we'd like to know if everything met your expectations.</p>
-        
-        <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="color: #2c3e50; margin-top: 0;">Order Number's:</h3>
-          <p style="font-weight: bold;">${orderNumbers || 'N/A'}</p>
-          
-          <h3 style="color: #2c3e50;">Products:</h3>
-          <div style="white-space: pre-line;">${productList || 'No products specified'}</div>
-          
-          <h3 style="color: #2c3e50;">Tracking Information:</h3>
-          <div style="font-family: monospace; white-space: pre-line;">${trackingNumbers || 'No tracking numbers'}</div>
+    const hasSpecialPO = orders.some(order => {
+        const po = order.po ? order.po.toString().toUpperCase() : '';
+        return po.includes('A') || po.includes('W') || po.includes('E');
+    });
+
+    const nnc_info = hasSpecialPO ? '' : `
+                        <font face="Tahoma, sans-serif" color="#666666"><b><span
+                                            class="il">Phone: 516-482-6313</span></b><br></font>
+                                <font face="Tahoma, sans-serif" color="#666666"><a style="text-decoration: none;"
+                                        href="https://nassaunationalcable.com">www.nassaunationalcable.com</a>
+                        `;
+
+    const garrie_image = hasSpecialPO ? '' : `<img src="https://i.imgur.com/wvxALVs.jpeg" alt="Imagen" width="500">`;
+    
+    const nassau_footer = hasSpecialPO ? '' : `
+                                        <div><span style="font-size:10pt;font-family:Tahoma,sans-serif">
+                                                <font color="#666666">Nassau National Cable | NY 11021</font><br>
+                                            </span>
+                                            <font size="1"><i>
+                                                    <font color="#999999">Argentina |&nbsp;Colombia | India | Poland |
+                                                        Ukraine | United States | Uruguay</font>
+                                                </i></font>
+                                        </div>`;
+
+    const nnc_team_header = hasSpecialPO ? '' : `<font face="Tahoma, sans-serif" color="#666666"><b><span
+                                            class="il">NNC Customer Service Team</span></b><br></font>`;
+
+    const nnc_logo = hasSpecialPO ? '' : `<img width="96" height="46" src="https://s3.us-east-2.amazonaws.com/starkflow.us/nnc.png"
+                style="color:rgb(34,34,34)" class="CToWUd" data-bit="iit">`;
+
+    const body = `
+                    <strong>Hi ${customerName}, </strong>
+                    <br><br>
+                    Your order has been delivered, and we'd like to know if everything met your expectations.
+                    <br><br>
+                    <strong>Order Number${orderNumbers.includes('<br>') || orderNumbers.includes(',') ? "'s" : ""}: </strong><br>
+                    ${orderNumbers.replace(/,/g, '<br>')}
+                    <br><br>
+                    <strong>Product${productList.includes("<br>-") ? "s" : ""}:</strong><br>
+                    -${productList}
+                    <br><br>
+                    <strong>Tracking Information:</strong><br>
+                    -${trackingNumbers}
+                    <br><br>
+                    If anything needs attention or you have a question, just reply - we'll take care of it.
+                    <br><br>
+                    Thanks again for choosing NNC. We're looking forward to your next order.
+                    <br><br>
+                    Best regards,
+                    <br>
+                    `;
+
+    const body_html = `<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+</head>
+
+<body><br>
+    ${testingBanner}
+    <p style="font-size:10pt;font-family:Tahoma,sans-serif"><span>${body}</span></p><br>
+    <div dir="ltr" class="gmail_signature" data-smartmail="gmail_signature">
+        <div dir="ltr">${nnc_logo}
+            <font color="#888888"><br style="color:rgb(34,34,34)">
+                <table cellpadding="0" cellspacing="0"
+                    style="color:rgb(34,34,34);background-color:transparent;border-spacing:0px;border-collapse:collapse">
+                    <tbody>
+                        <tr><br>
+                            <td style="padding:0px">
+                                <font color="#00006f" face="Tahoma, sans-serif"><b><span class="il"></span></b>
+                                </font>
+                                ${nnc_team_header}
+                                ${nnc_info}
+                                    <font face="Tahoma, sans-serif" color="#666666">
+                                        ${nassau_footer}
+                            </td>
+                        </tr>
+                    </tbody>
+                </table><a style="text-decoration:none;" href="https://www.linkedin.com/company/nassaunationalcable/"
+                    target="_blank"
+                    data-saferedirecturl="https://www.google.com/url?q=https://www.linkedin.com/company/nassaunationalcable/&amp;source=gmail&amp;ust=1687284573416000&amp;usg=AOvVaw0lv_0znO6DQioGdUZ5jHg0"><img
+                        src="https://ci3.googleusercontent.com/mail-sig/AIorK4x9YsL6RScQKGevrjyhcIi7-QMOZEumdVELt78Y3TR9C0bLAo0nVu0TDBOx55ab_YK1jxAHGas"
+                        class="CToWUd" data-bit="iit"></a>&nbsp;&nbsp;&nbsp;<a style="text-decoration:none;"
+                    href="https://www.facebook.com/nassaunationalcable" target="_blank"
+                    data-saferedirecturl="https://www.google.com/url?q=https://www.facebook.com/nassaunationalcable&amp;source=gmail&amp;ust=1687284573416000&amp;usg=AOvVaw3zpnI-XABSj--PVCVDKScF"><img
+                        src="https://ci3.googleusercontent.com/mail-sig/AIorK4znOVUFqstVsa5DSxVa0rKoiEIvb6FHWD0HyM-zUtl0ZRttlAVLsPODbADYpV_-8XNrNlUomp8"
+                        class="CToWUd" data-bit="iit"></a>&nbsp;&nbsp;&nbsp;<a style="text-decoration:none;"
+                    href="https://twitter.com/CableNassau?s=20" target="_blank"
+                    data-saferedirecturl="https://www.google.com/url?q=https://twitter.com/CableNassau?s%3D20&amp;source=gmail&amp;ust=1687284573416000&amp;usg=AOvVaw3PGIaXzeJbZAbEGGeMNiuq"><img
+                        src="https://ci3.googleusercontent.com/mail-sig/AIorK4xOM0kDPDtiqMXZfm0Yb_C-x5ALOWNC9VRd2_dghiINYuQvivUa6l0OdhP1Z0fDmkDRJFz5GG0"
+                        class="CToWUd" data-bit="iit"></a>&nbsp;&nbsp;&nbsp;<a style="text-decoration:none;"
+                    href="https://www.instagram.com/nassaunationalcable/" target="_blank"
+                    data-saferedirecturl="https://www.google.com/url?q=https://www.instagram.com/nassaunationalcable/&amp;source=gmail&amp;ust=1687284573416000&amp;usg=AOvVaw3cqkHlGXuHKipSCcTRMlNl"><img
+                        src="https://ci3.googleusercontent.com/mail-sig/AIorK4y7fNWamYzfOQaXBGuk8aN4sUhoeHPtHHBU9RS6Ws7rEOR_YthRQ3dINQcENzM_MZe6LvxV0N4"
+                        class="CToWUd" data-bit="iit"></a>&nbsp; &nbsp;<a style="text-decoration:none;"
+                    href="https://www.youtube.com/channel/UCDKDyoBSSi9W3QgGMySDyAQ" target="_blank"
+                    data-saferedirecturl="https://www.google.com/url?q=https://www.youtube.com/channel/UCDKDyoBSSi9W3QgGMySDyAQ&amp;source=gmail&amp;ust=1687284573416000&amp;usg=AOvVaw0WBWlyFAAax-X4h2ySTxQ6"><img
+                        src="https://ci3.googleusercontent.com/mail-sig/AIorK4xTKiZnhvQJaL0SPCNMxqfQl9Nh44LK9R2Ckj0-z3nhkxz64wWkmmFTfL49Q_LCsCvLvGMF_fM"
+                        class="CToWUd" data-bit="iit"></a><br>
+            </font><br><br>
         </div>
-        
-        <p>If anything needs attention or you have a question, just reply - we'll take care of it.</p>
-        
-        <p>Thanks again for choosing NNC. We're looking forward to your next order.</p>
-        
-        <p style="margin-top: 30px;">
-          Best regards,<br>
-          <strong>NNC Team</strong>
-        </p>
-      </div>
-    </body>
-    </html>
-  `;
+    </div>
+    ${garrie_image}
+</body>
+
+</html>`;
+
+    return body_html;
 }
 
 
@@ -429,5 +565,4 @@ function setupTrigger() {
 //     PropertiesService.getScriptProperties().setProperty('SPARKPOST_TOKEN', token);
 //     console.log('SparkPost token configured successfully');
 // }
-
 
